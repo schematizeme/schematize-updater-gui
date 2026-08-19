@@ -1,0 +1,32 @@
+[package]
+name = "schematize-updater-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Janela (Slint) do gestor de atualizações do schematize — casca VISUAL fina por cima do binário `schematize-updater` (headless std-only). Mostra versões/plataforma, atualiza/instala com progresso ao vivo e abre o app. Funciona mesmo com o app principal quebrado ou na 1ª instalação (cenário 'prever macacos': o leigo vê uma janela amigável, não um terminal)."
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "schematize-updater-gui"
+path = "src/main.rs"
+
+[dependencies]
+# Mesmo toolkit/backend da GUI principal (winit cobre Wayland+X11; renderer femtovg;
+# sem skia pra não exigir cmake). NÃO depende do crate `schematize` de propósito: a
+# casca só orquestra o binário `schematize-updater` (headless), então NUNCA embute
+# versão via git-dep — o problema que originou o "abre a versão antiga".
+slint = { version = "1.17", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-femtovg",
+    "accessibility",
+] }
+
+[build-dependencies]
+slint-build = "1.17"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
