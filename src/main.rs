@@ -32,21 +32,33 @@ struct Status {
 /// Resolve o binário do updater: PATH → ~/.cargo/bin → ao lado deste executável. Assim funciona
 /// mesmo lançado pelo menu do desktop (cujo PATH não tem ~/.cargo/bin) — mesma lição do launcher.
 fn updater_bin() -> PathBuf {
-    let name = if cfg!(windows) { "schematize-updater.exe" } else { "schematize-updater" };
+    // DOIS nomes, novo primeiro: o app virou Overflow e `schematize-updater` segue
+    // instalado em máquina que não atualizou. Procurar só um deles deixaria a janela
+    // sem backend — e o sintoma seria uma GUI que abre e não faz nada.
+    let names: [&str; 2] = if cfg!(windows) {
+        ["overflow-updater.exe", "schematize-updater.exe"]
+    } else {
+        ["overflow-updater", "schematize-updater"]
+    };
+    let name = names[0];
     // 1) ao lado de mim (instalação canônica em ~/.cargo/bin junto do gui).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let c = dir.join(name);
-            if c.is_file() {
-                return c;
+            for n in names {
+                let c = dir.join(n);
+                if c.is_file() {
+                    return c;
+                }
             }
         }
     }
     // 2) ~/.cargo/bin.
     if let Some(home) = home_dir() {
-        let c = home.join(".cargo").join("bin").join(name);
-        if c.is_file() {
-            return c;
+        for n in names {
+            let c = home.join(".cargo").join("bin").join(n);
+            if c.is_file() {
+                return c;
+            }
         }
     }
     // 3) confia no PATH.
@@ -75,7 +87,10 @@ fn read_status() -> Status {
         let label = label.trim();
         let value = value.trim().to_string();
         match label {
-            "schematize-updater" => s.updater_ver = value,
+            // Os dois rótulos: GUI e updater se atualizam em momentos diferentes, e
+            // uma janela nova falando com um updater antigo (ou o inverso) tem de ler
+            // a versão do mesmo jeito.
+            "overflow-updater" | "schematize-updater" => s.updater_ver = value,
             "plataforma" => s.platform = value,
             "binário pronto?" => s.binready = value,
             "app instalado" => s.app_installed = value,

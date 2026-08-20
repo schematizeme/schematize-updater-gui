@@ -6,6 +6,11 @@ description = "Janela (Slint) do gestor de atualizações do schematize — casc
 license = "MIT"
 publish = false
 
+# Dois binários da mesma fonte — mesma razão do CLI, da GUI e do updater.
+[[bin]]
+name = "overflow-updater-gui"
+path = "src/main.rs"
+
 [[bin]]
 name = "schematize-updater-gui"
 path = "src/main.rs"
