@@ -1,6 +1,6 @@
 [package]
 name = "schematize-updater-gui"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Janela (Slint) do gestor de atualizações do schematize — casca VISUAL fina por cima do binário `schematize-updater` (headless std-only). Mostra versões/plataforma, atualiza/instala com progresso ao vivo e abre o app. Funciona mesmo com o app principal quebrado ou na 1ª instalação (cenário 'prever macacos': o leigo vê uma janela amigável, não um terminal)."
 license = "MIT"
@@ -26,7 +26,11 @@ slint = { version = "1.17", default-features = false, features = [
 [build-dependencies]
 slint-build = "1.17"
 
+# Perfil de release COMPARTILHADO com os repos irmãos (schematize-cli e a GUI Slint).
+# O install.sh compila os três num `CARGO_TARGET_DIR` único; cargo só reaproveita um
+# artefato quando o perfil é IDÊNTICO, e 226 das dependências são as mesmas nos três.
+# Divergir aqui (um `opt-level` que seja) parte o cache e faz tudo compilar 3 vezes.
 [profile.release]
 strip = true
-opt-level = "z"
-lto = true
+opt-level = 3
+lto = "thin"

@@ -4081,7 +4081,7 @@ dependencies = [
 
 [[package]]
 name = "schematize-updater-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "slint",
  "slint-build",
