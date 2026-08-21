@@ -32,13 +32,13 @@ struct Status {
 /// Resolve o binário do updater: PATH → ~/.cargo/bin → ao lado deste executável. Assim funciona
 /// mesmo lançado pelo menu do desktop (cujo PATH não tem ~/.cargo/bin) — mesma lição do launcher.
 fn updater_bin() -> PathBuf {
-    // DOIS nomes, novo primeiro: o app virou Overflow e `schematize-updater` segue
-    // instalado em máquina que não atualizou. Procurar só um deles deixaria a janela
-    // sem backend — e o sintoma seria uma GUI que abre e não faz nada.
+    // Canônico primeiro, e o do interregno (nome Overflow) como rede: máquina que
+    // instalou naquela janela pode ter só aquele binário, e procurar um só deixaria a
+    // janela sem backend — o sintoma seria uma GUI que abre e não faz nada.
     let names: [&str; 2] = if cfg!(windows) {
-        ["overflow-updater.exe", "schematize-updater.exe"]
+        ["schematize-updater.exe", "overflow-updater.exe"]
     } else {
-        ["overflow-updater", "schematize-updater"]
+        ["schematize-updater", "overflow-updater"]
     };
     let name = names[0];
     // 1) ao lado de mim (instalação canônica em ~/.cargo/bin junto do gui).
@@ -88,9 +88,9 @@ fn read_status() -> Status {
         let value = value.trim().to_string();
         match label {
             // Os dois rótulos: GUI e updater se atualizam em momentos diferentes, e
-            // uma janela nova falando com um updater antigo (ou o inverso) tem de ler
-            // a versão do mesmo jeito.
-            "overflow-updater" | "schematize-updater" => s.updater_ver = value,
+            // uma janela nova falando com um updater do interregno (ou o inverso) tem
+            // de ler a versão do mesmo jeito.
+            "schematize-updater" | "overflow-updater" => s.updater_ver = value,
             "plataforma" => s.platform = value,
             "binário pronto?" => s.binready = value,
             "app instalado" => s.app_installed = value,
