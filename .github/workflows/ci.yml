@@ -1,0 +1,51 @@
+name: ci
+
+# POR QUE ISTO EXISTE
+#
+# Este repo nao tinha workflow NENHUM: nada compilava nem rodava
+# em CI. Dava pra fundir no main com a suite vermelha e ninguem saberia.
+# A Definition of Done da casa exige "CI verde" — e nao existia CI que pudesse estar verde.
+#
+# `fmt` fica de fora pelo mesmo motivo do CLI: divergencias de rustfmt anteriores a
+# qualquer disciplina aqui, e gate que reprova todo mundo no primeiro dia e gate que
+# alguem desliga na primeira semana.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Slint com backend winit + renderer femtovg precisa do X11/Wayland/fontconfig
+      # de desenvolvimento pra LINKAR, mesmo sem abrir janela nenhuma no CI.
+      - name: deps de sistema (Slint)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            pkg-config \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libfontconfig1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-ci-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: testes
+        run: cargo test --all-targets
