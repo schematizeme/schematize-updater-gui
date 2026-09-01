@@ -1,6 +1,6 @@
 [package]
 name = "schematize-updater-gui"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Janela (Slint) do gestor de atualizações do schematize — casca VISUAL fina por cima do binário `schematize-updater` (headless std-only). Mostra versões/plataforma, atualiza/instala com progresso ao vivo e abre o app. Funciona mesmo com o app principal quebrado ou na 1ª instalação (cenário 'prever macacos': o leigo vê uma janela amigável, não um terminal)."
 license = "MIT"

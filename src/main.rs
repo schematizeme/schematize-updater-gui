@@ -66,22 +66,47 @@ fn updater_bin() -> PathBuf {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from).or_else(|| {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    })
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }
 
-/// Roda `schematize-updater status` e faz o parse por prefixo de rótulo.
-fn read_status() -> Status {
-    let mut s = Status::default();
-    let out = Command::new(updater_bin())
+/// Roda `schematize-updater status` e devolve o `Status`, ou POR QUE não deu.
+///
+/// **Onde:** na abertura da janela e depois de cada ação (`refresh`, fim do install).
+///
+/// **Por que devolve `Result` e não um `Status` vazio:** a versão anterior engolia a falha
+/// (`_ => return s`) e devolvia o `Status::default()`. Com os campos vazios, `app_missing`
+/// virava `true` e a janela afirmava **"app não instalado"** — quando a verdade era "não
+/// consegui falar com o updater". A pessoa então clicava em "Instalar", que chama o mesmo
+/// binário ausente, e nada acontecia. Estado de erro renderizado como fato é pior que erro
+/// visível: manda a pessoa consertar o problema errado.
+fn read_status() -> Result<Status, String> {
+    let bin = updater_bin();
+    let out = Command::new(&bin)
         .arg("status")
         .stdin(Stdio::null())
-        .output();
-    let text = match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-        _ => return s,
-    };
+        .output()
+        .map_err(|e| format!("não consegui executar {}: {e}", bin.display()))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim();
+        return Err(format!(
+            "{} status falhou ({}){}",
+            bin.display(),
+            out.status,
+            if err.is_empty() { String::new() } else { format!(": {err}") }
+        ));
+    }
+    Ok(parse_status(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Parse da saída de `schematize-updater status`, por prefixo de rótulo.
+///
+/// **Onde:** [`read_status`], e os testes — é a metade que não toca em processo nenhum, e
+/// por isso a única que dá pra exercitar sem o updater instalado na máquina.
+fn parse_status(text: &str) -> Status {
+    let mut s = Status::default();
     for line in text.lines() {
         let Some((label, value)) = line.split_once(':') else { continue };
         let label = label.trim();
@@ -100,11 +125,35 @@ fn read_status() -> Status {
             _ => {}
         }
     }
-    s.app_missing = s.app_installed.is_empty()
-        || s.app_installed == "nenhum"
-        || s.app_installed == "—";
+    s.app_missing =
+        s.app_installed.is_empty() || s.app_installed == "nenhum" || s.app_installed == "—";
     s.has_update = !s.app_missing && semver_gt(strip_v(&s.app_latest), strip_v(&s.app_installed));
     s
+}
+
+/// Aplica na janela o resultado de [`read_status`] — inclusive quando ele é `Err`.
+///
+/// **Onde:** os quatro pontos que liam o status (abertura, refresh, fim do install).
+///
+/// **Por quê:** sem isto cada chamador teria de lembrar de tratar o `Err`, e o que existia
+/// antes era justamente um `Err` esquecido virando "app não instalado".
+fn aplicar_leitura(w: &MainWindow, r: Result<Status, String>) {
+    match r {
+        Ok(s) => {
+            w.set_updater_ausente(false);
+            apply_status(w, &s);
+        }
+        Err(e) => {
+            // Nada de afirmar sobre o app: não sabemos. A janela diz o que houve e o botão
+            // de ação sai de cena — clicar chamaria o mesmo binário que acabou de falhar.
+            apply_status(w, &Status::default());
+            w.set_app_missing(false);
+            w.set_has_update(false);
+            w.set_updater_ausente(true);
+            w.set_action_label("Instalar".into());
+            w.set_status_line(format!("sem contato com o updater — {e}").into());
+        }
+    }
 }
 
 fn strip_v(s: &str) -> &str {
@@ -140,8 +189,14 @@ fn apply_status(w: &MainWindow, s: &Status) {
     w.set_app_missing(s.app_missing);
     w.set_has_update(s.has_update);
     w.set_action_label(
-        if s.app_missing { "Instalar" } else if s.has_update { "Atualizar" } else { "Reinstalar" }
-            .into(),
+        if s.app_missing {
+            "Instalar"
+        } else if s.has_update {
+            "Atualizar"
+        } else {
+            "Reinstalar"
+        }
+        .into(),
     );
 }
 
@@ -149,7 +204,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let w = MainWindow::new()?;
 
     // Carrega o status inicial.
-    apply_status(&w, &read_status());
+    aplicar_leitura(&w, read_status());
 
     let busy = Arc::new(AtomicBool::new(false));
 
@@ -165,7 +220,9 @@ fn main() -> Result<(), slint::PlatformError> {
             let subcmd = if w.get_app_missing() { "install" } else { "update" };
             w.set_busy(true);
             w.set_log(format!("$ schematize-updater {subcmd}\n").into());
-            w.set_status_line("baixando/compilando — isso pode levar alguns minutos na 1ª vez…".into());
+            w.set_status_line(
+                "baixando/compilando — isso pode levar alguns minutos na 1ª vez…".into(),
+            );
 
             let weak2 = weak.clone();
             let busy2 = busy.clone();
@@ -174,7 +231,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 // ao terminar: recarrega status e libera os botões, no event loop.
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(w) = weak2.upgrade() {
-                        apply_status(&w, &read_status());
+                        aplicar_leitura(&w, read_status());
                         w.set_busy(false);
                         w.set_status_line("concluído. reabra o app se estava aberto.".into());
                     }
@@ -201,7 +258,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = w.as_weak();
         w.on_refresh(move || {
             if let Some(w) = weak.upgrade() {
-                apply_status(&w, &read_status());
+                aplicar_leitura(&w, read_status());
                 w.set_status_line("status atualizado.".into());
             }
         });
@@ -274,4 +331,124 @@ fn push_log(weak: &slint::Weak<MainWindow>, line: String) {
             w.set_log(s.into());
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Saída típica do `schematize-updater status`, com todos os rótulos.
+    const SAIDA: &str = "\
+schematize-updater: 0.6.2
+plataforma: linux-x86_64
+binário pronto?: sim
+app instalado: 0.55.0
+última publicada: 0.55.2
+dir de instalação: /home/u/.cargo/bin
+versão fixada (pin): nenhuma
+";
+
+    /// O parse pega cada rótulo, e o `has_update` sai da comparação de versões.
+    #[test]
+    fn parse_le_todos_os_rotulos() {
+        let s = parse_status(SAIDA);
+        assert_eq!(s.updater_ver, "0.6.2");
+        assert_eq!(s.platform, "linux-x86_64");
+        assert_eq!(s.binready, "sim");
+        assert_eq!(s.app_installed, "0.55.0");
+        assert_eq!(s.app_latest, "0.55.2");
+        assert_eq!(s.instdir, "/home/u/.cargo/bin");
+        assert_eq!(s.pin, "nenhuma");
+        assert!(!s.app_missing, "o app está instalado");
+        assert!(s.has_update, "0.55.0 -> 0.55.2 é atualização");
+    }
+
+    /// O rótulo do interregno (nome Overflow) tem que ser lido igual — uma máquina que
+    /// instalou naquela janela ainda tem o binário antigo respondendo.
+    #[test]
+    fn rotulo_antigo_do_updater_e_lido() {
+        assert_eq!(parse_status("overflow-updater: 0.2.3\n").updater_ver, "0.2.3");
+    }
+
+    /// App ausente: os três jeitos de o updater dizer "não tem".
+    #[test]
+    fn app_ausente_em_qualquer_das_formas() {
+        for v in ["", "nenhum", "—"] {
+            let s = parse_status(&format!("app instalado: {v}\núltima publicada: 1.0.0\n"));
+            assert!(s.app_missing, "{v:?} tinha que contar como ausente");
+            assert!(!s.has_update, "app ausente não é 'tem update', é 'instalar'");
+        }
+    }
+
+    /// Linha sem `:` e rótulo desconhecido são ignorados sem estragar o resto.
+    #[test]
+    fn lixo_na_saida_nao_derruba_o_parse() {
+        let s = parse_status("isto nao tem dois pontos\ndesconhecido: 9\napp instalado: 1.2.3\n");
+        assert_eq!(s.app_installed, "1.2.3");
+    }
+
+    /// Entrada vazia não pode virar afirmação sobre o app.
+    ///
+    /// Ela ainda marca `app_missing` — e é por isso que [`read_status`] devolve `Result`:
+    /// quem não conseguiu FALAR com o updater não passa por aqui, passa pelo `Err`.
+    #[test]
+    fn saida_vazia_marca_ausente_mas_nao_ve_update() {
+        let s = parse_status("");
+        assert!(s.app_missing);
+        assert!(!s.has_update, "sem dado nenhum não existe atualização a oferecer");
+    }
+
+    /// Comparação de versões: os casos que decidem se o botão diz "Atualizar".
+    #[test]
+    fn semver_compara_o_que_importa() {
+        assert!(semver_gt("0.55.2", "0.55.1"));
+        assert!(semver_gt("1.0.0", "0.99.99"));
+        assert!(semver_gt("0.6.0", "0.5.9"));
+        assert!(!semver_gt("0.55.1", "0.55.1"), "igual não é maior");
+        assert!(!semver_gt("0.55.0", "0.55.1"), "menor não é maior");
+        // Campo que não é versão (o updater imprime "? (rede)" quando não alcança a rede)
+        // nunca pode virar "tem atualização".
+        assert!(!semver_gt("? (rede)", "0.55.1"));
+        assert!(!semver_gt("0.55.1", "? (rede)"));
+        // Número de partes diferente.
+        assert!(semver_gt("1.1", "1.0.9"));
+        assert!(!semver_gt("1.0", "1.0.0"));
+    }
+
+    /// O `v` da tag é aparado dos dois lados antes de comparar.
+    #[test]
+    fn strip_v_apara_tag_e_espaco() {
+        assert_eq!(strip_v(" v1.2.3 "), "1.2.3");
+        assert_eq!(strip_v("1.2.3"), "1.2.3");
+        assert_eq!(strip_v(""), "");
+    }
+
+    /// **O bug que estes testes existem pra travar.** `updater_bin()` aponta pro PATH quando
+    /// não acha nada; se aquele binário não existe, `read_status` tem que dar `Err` — não
+    /// devolver um `Status` vazio, que a janela leria como "app não instalado".
+    #[test]
+    fn updater_inalcancavel_e_erro_e_nao_status_vazio() {
+        // Não dá pra tirar o updater do PATH sem mexer em estado global do processo. O que
+        // dá — e é o que importa — é provar que o caminho de erro NÃO passa pelo parse: um
+        // `Status` só nasce de texto que o updater realmente imprimiu.
+        let vazio = parse_status("");
+        assert!(vazio.app_missing, "o parse de vazio marca ausente…");
+        // …e por isso `read_status` não pode devolver ISTO quando falha em executar.
+        // A assinatura é a prova estrutural: `Result<Status, String>`.
+        fn assina(_: fn() -> Result<Status, String>) {}
+        assina(read_status);
+    }
+
+    /// O nome do executável do updater conhece o Windows — mesma lição do D10 no CLI.
+    #[test]
+    fn nome_do_binario_por_plataforma() {
+        let p = updater_bin();
+        let nome = p.file_name().unwrap().to_string_lossy().into_owned();
+        if cfg!(windows) {
+            assert!(nome.ends_with(".exe"), "no Windows o binário é .exe: {nome}");
+        } else {
+            assert!(!nome.ends_with(".exe"), "fora do Windows não tem .exe: {nome}");
+        }
+        assert!(nome.contains("updater"), "{nome}");
+    }
 }

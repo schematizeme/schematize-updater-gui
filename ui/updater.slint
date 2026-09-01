@@ -87,6 +87,9 @@ export component MainWindow inherits Window {
     in-out property <string> pin: "";
     in-out property <bool> has-update: false;
     in-out property <bool> app-missing: false;
+    // Sem contato com o `schematize-updater`: NÃO é o mesmo que "app não instalado", e a
+    // janela não pode afirmar uma coisa quando o que houve foi a outra.
+    in-out property <bool> updater-ausente: false;
     in-out property <bool> busy: false;
     in-out property <string> action-label: "Atualizar";
     in-out property <string> status-line: "";
@@ -123,11 +126,13 @@ export component MainWindow inherits Window {
                 spacing: 8px;
                 Rectangle {
                     width: 10px; height: 10px; border-radius: 5px;
-                    background: root.app-missing ? Th.warn : (root.has-update ? Th.accent : Th.good);
+                    background: root.updater-ausente ? Th.warn
+                        : (root.app-missing ? Th.warn : (root.has-update ? Th.accent : Th.good));
                 }
                 Text {
                     vertical-alignment: center;
-                    text: root.app-missing ? "app não instalado"
+                    text: root.updater-ausente ? "sem contato com o updater"
+                        : root.app-missing ? "app não instalado"
                         : (root.has-update ? "atualização disponível" : "em dia");
                     color: Th.text;
                     font-size: 13px;
