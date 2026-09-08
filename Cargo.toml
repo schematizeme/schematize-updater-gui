@@ -1,13 +1,19 @@
 [package]
+# O CRATE mantém o nome do repositório; o BINÁRIO passou a `schematize-market-gui` (ADR-0014).
+# Ver o README: o repo é o endereço histórico, o binário é o que o usuário e o PATH veem.
 name = "schematize-updater-gui"
 version = "0.1.2"
 edition = "2021"
-description = "Janela (Slint) do gestor de atualizações do schematize — casca VISUAL fina por cima do binário `schematize-updater` (headless std-only). Mostra versões/plataforma, atualiza/instala com progresso ao vivo e abre o app. Funciona mesmo com o app principal quebrado ou na 1ª instalação (cenário 'prever macacos': o leigo vê uma janela amigável, não um terminal)."
+description = "Janela (Slint) do gestor de atualizações do schematize — casca VISUAL fina por cima do binário `schematize-market` (headless std-only). Mostra versões/plataforma, atualiza/instala com progresso ao vivo e abre o app. Funciona mesmo com o app principal quebrado ou na 1ª instalação (cenário 'prever macacos': o leigo vê uma janela amigável, não um terminal)."
 license = "MIT"
 publish = false
 
 [[bin]]
-name = "schematize-updater-gui"
+# `schematize-market-gui`, e não mais `-updater-`: o dono mudou (ADR-0013/0014), e nome de
+# binário que não bate com o dono é exatamente o que deixou o update do deployer morto por um
+# release inteiro — a função procurava `deployer` depois de o binário virar
+# `schematize-deployer`, e ninguém percebeu porque nada dá erro nesse caso.
+name = "schematize-market-gui"
 path = "src/main.rs"
 
 [dependencies]

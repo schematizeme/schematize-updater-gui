@@ -1,10 +1,28 @@
-//! schematize-updater-gui — janela (Slint) do gestor de atualizações.
+//! A janela (Slint) do gestor de atualizações — hoje o `schematize-market`.
 //!
-//! O quê: casca VISUAL fina por cima do binário `schematize-updater` (headless std-only). Lê o
-//! `status`, dispara `install`/`update` com progresso AO VIVO no log, e abre o app (`run`). Onde:
-//! chamada pelo app/instalador quando o usuário quer uma janela amigável (1ª instalação ou update),
-//! em vez de um terminal — o cenário "prever macacos". NÃO depende do crate `schematize`: fala só
-//! com o binário do updater, então nunca embute versão via git-dep (o bug que dava "abre a antiga").
+//! O quê: casca VISUAL fina por cima do binário do gestor. Lê o `status --json`, dispara
+//! `install`/`update` com progresso AO VIVO no log, e abre o app (`run`). Onde: chamada pelo
+//! app/instalador quando o usuário quer uma janela amigável (1ª instalação ou update), em vez
+//! de um terminal — o cenário "prever macacos". NÃO depende do crate `schematize`: fala só com
+//! o binário do gestor, então nunca embute versão via git-dep (o bug que dava "abre a antiga").
+//!
+//! ## Mudança de dono (ADR-0013 + ADR-0014)
+//!
+//! Esta janela era a do `schematize-updater`. Aquele binário foi ABSORVIDO pelo
+//! `schematize-market`, que passou a ser o único responsável por instalar e atualizar. O
+//! ADR-0014 (D4) decidiu que a janela **não** é descontinuada: ela vira a janela do market —
+//! o que a quebrou foi o dono ter mudado, não ela. O D5 a distribui como asset do release do
+//! market, então ela deixa de ser o único binário da casa que compila do fonte em toda
+//! máquina.
+//!
+//! ## Por que ela lê `--json` e não a tabela de `status`
+//!
+//! A tabela humana passa pelo catálogo i18n do market: os rótulos são `plataforma` em
+//! português, `platform` em inglês, `プラットフォーム` em japonês. Esta janela casava o rótulo
+//! **em português** — então lia certo num idioma e devolvia tudo vazio nos outros dezenove,
+//! **sem erro nenhum**. Com os campos vazios, `app_missing` virava `true` e a janela afirmava
+//! "app não instalado" a quem tinha o app. Parsear saída feita para humano é contrato de
+//! mentira: passa no teste de quem escreveu e falha na máquina de quem usa.
 #![windows_subsystem = "windows"]
 
 use std::io::{BufRead, BufReader};
@@ -18,7 +36,7 @@ slint::include_modules!();
 /// Estado lido do `schematize-updater status`.
 #[derive(Default, Clone)]
 struct Status {
-    updater_ver: String,
+    gestor_ver: String,
     app_installed: String,
     app_latest: String,
     platform: String,
@@ -29,17 +47,18 @@ struct Status {
     has_update: bool,
 }
 
-/// Resolve o binário do updater: PATH → ~/.cargo/bin → ao lado deste executável. Assim funciona
+/// Resolve o binário do GESTOR: ao lado deste executável → ~/.cargo/bin → PATH. Assim funciona
 /// mesmo lançado pelo menu do desktop (cujo PATH não tem ~/.cargo/bin) — mesma lição do launcher.
-fn updater_bin() -> PathBuf {
-    // Canônico primeiro, e o do interregno (nome Overflow) como rede: máquina que
-    // instalou naquela janela pode ter só aquele binário, e procurar um só deixaria a
-    // janela sem backend — o sintoma seria uma GUI que abre e não faz nada.
-    let names: [&str; 2] = if cfg!(windows) {
-        ["schematize-updater.exe", "overflow-updater.exe"]
-    } else {
-        ["schematize-updater", "overflow-updater"]
-    };
+///
+/// **Só o `schematize-market`, e de propósito.** A lista antiga trazia `schematize-updater` e
+/// o nome do interregno como rede. Os dois estão aposentados: o updater foi absorvido
+/// (ADR-0013) e é REMOVIDO pelo market e pelo `install.sh` ao assumir. Manter o fallback faria
+/// a janela conversar com um gestor congelado numa máquina em transição — e o que ele fizesse
+/// desfaria o que o market acabou de fazer. Sem backend é um erro visível; com o backend
+/// errado é um estrago silencioso.
+fn gestor_bin() -> PathBuf {
+    let names: [&str; 1] =
+        if cfg!(windows) { ["schematize-market.exe"] } else { ["schematize-market"] };
     let name = names[0];
     // 1) ao lado de mim (instalação canônica em ~/.cargo/bin junto do gui).
     if let Ok(exe) = std::env::current_exe() {
@@ -71,20 +90,20 @@ fn home_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }
 
-/// Roda `schematize-updater status` e devolve o `Status`, ou POR QUE não deu.
+/// Roda `schematize-market status --json` e devolve o `Status`, ou POR QUE não deu.
 ///
 /// **Onde:** na abertura da janela e depois de cada ação (`refresh`, fim do install).
 ///
 /// **Por que devolve `Result` e não um `Status` vazio:** a versão anterior engolia a falha
 /// (`_ => return s`) e devolvia o `Status::default()`. Com os campos vazios, `app_missing`
 /// virava `true` e a janela afirmava **"app não instalado"** — quando a verdade era "não
-/// consegui falar com o updater". A pessoa então clicava em "Instalar", que chama o mesmo
+/// consegui falar com o gestor". A pessoa então clicava em "Instalar", que chama o mesmo
 /// binário ausente, e nada acontecia. Estado de erro renderizado como fato é pior que erro
 /// visível: manda a pessoa consertar o problema errado.
 fn read_status() -> Result<Status, String> {
-    let bin = updater_bin();
+    let bin = gestor_bin();
     let out = Command::new(&bin)
-        .arg("status")
+        .args(["status", "--json"])
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("não consegui executar {}: {e}", bin.display()))?;
@@ -98,37 +117,88 @@ fn read_status() -> Result<Status, String> {
             if err.is_empty() { String::new() } else { format!(": {err}") }
         ));
     }
-    Ok(parse_status(&String::from_utf8_lossy(&out.stdout)))
+    Ok(parse_json(&String::from_utf8_lossy(&out.stdout)))
 }
 
-/// Parse da saída de `schematize-updater status`, por prefixo de rótulo.
+/// Lê o JSON do `schematize-market status --json`.
 ///
-/// **Onde:** [`read_status`], e os testes — é a metade que não toca em processo nenhum, e
-/// por isso a única que dá pra exercitar sem o updater instalado na máquina.
-fn parse_status(text: &str) -> Status {
+/// **Onde:** [`read_status`], e os testes — é a metade que não toca em processo nenhum, e por
+/// isso a única que dá para exercitar sem o gestor instalado na máquina.
+///
+/// **Por que um leitor de JSON à mão, e não `serde_json`:** esta janela é `std`-only de
+/// propósito. Ela é a interface que tem de abrir **quando o resto está quebrado** — primeira
+/// instalação, app corrompido, toolchain incompleto. Cada dependência que ela ganha é uma
+/// chance a mais de ela não compilar justamente na máquina onde ela é a única coisa que
+/// funciona. O contrato tem nove chaves de topo, todas planas; ler isso custa esta função.
+///
+/// **O que ele NÃO tenta ser:** um parser de JSON. Ele lê o shape que o market emite, que é
+/// fixo e travado por teste do lado de lá (`o_shape_do_json_e_contrato`). JSON arbitrário —
+/// aninhado, com escapes exóticos — não é entrada esperada aqui, e o resultado de um shape
+/// inesperado é campo vazio, nunca pânico.
+fn parse_json(text: &str) -> Status {
     let mut s = Status::default();
-    for line in text.lines() {
-        let Some((label, value)) = line.split_once(':') else { continue };
-        let label = label.trim();
-        let value = value.trim().to_string();
-        match label {
-            // Os dois rótulos: GUI e updater se atualizam em momentos diferentes, e
-            // uma janela nova falando com um updater do interregno (ou o inverso) tem
-            // de ler a versão do mesmo jeito.
-            "schematize-updater" | "overflow-updater" => s.updater_ver = value,
-            "plataforma" => s.platform = value,
-            "binário pronto?" => s.binready = value,
-            "app instalado" => s.app_installed = value,
-            "última publicada" => s.app_latest = value,
-            "dir de instalação" => s.instdir = value,
-            l if l.starts_with("versão fixada") => s.pin = value,
-            _ => {}
-        }
-    }
+    let campo = |k: &str| valor_de(text, k).unwrap_or_default();
+
+    s.gestor_ver = campo("market");
+    s.app_installed = campo("app_installed");
+    s.app_latest = campo("app_latest");
+    s.instdir = campo("install_dir");
+    s.pin = campo("pin");
+
+    s.platform = match (valor_de(text, "os"), valor_de(text, "arch")) {
+        (Some(o), Some(a)) => format!("{o} / {a}"),
+        (Some(o), None) => o,
+        _ => String::new(),
+    };
+    s.binready = match booleano_de(text, "prebuilt") {
+        Some(true) => "sim".into(),
+        Some(false) => "não".into(),
+        None => String::new(),
+    };
+
     s.app_missing =
         s.app_installed.is_empty() || s.app_installed == "nenhum" || s.app_installed == "—";
     s.has_update = !s.app_missing && semver_gt(strip_v(&s.app_latest), strip_v(&s.app_installed));
     s
+}
+
+/// **O quê:** o valor de string de uma chave de topo. `None` se ausente ou `null`.
+/// **Onde:** [`parse_json`].
+///
+/// Procura `"chave"` seguido de `:` e de aspas. `null` (sem aspas) devolve `None` — é como o
+/// market diz "não há pin", e tratá-lo como a string `"null"` mostraria a palavra na tela.
+fn valor_de(text: &str, chave: &str) -> Option<String> {
+    let marca = format!("\"{chave}\"");
+    let i = text.find(&marca)? + marca.len();
+    let resto = text[i..].trim_start().strip_prefix(':')?.trim_start();
+    if resto.starts_with("null") {
+        return None;
+    }
+    let resto = resto.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = resto.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push(chars.next()?),
+            '"' => return Some(out),
+            _ => out.push(c),
+        }
+    }
+    None
+}
+
+/// **O quê:** o valor booleano de uma chave de topo. **Onde:** [`parse_json`], para `prebuilt`.
+fn booleano_de(text: &str, chave: &str) -> Option<bool> {
+    let marca = format!("\"{chave}\"");
+    let i = text.find(&marca)? + marca.len();
+    let resto = text[i..].trim_start().strip_prefix(':')?.trim_start();
+    if resto.starts_with("true") {
+        Some(true)
+    } else if resto.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Aplica na janela o resultado de [`read_status`] — inclusive quando ele é `Err`.
@@ -140,7 +210,7 @@ fn parse_status(text: &str) -> Status {
 fn aplicar_leitura(w: &MainWindow, r: Result<Status, String>) {
     match r {
         Ok(s) => {
-            w.set_updater_ausente(false);
+            w.set_gestor_ausente(false);
             apply_status(w, &s);
         }
         Err(e) => {
@@ -149,9 +219,9 @@ fn aplicar_leitura(w: &MainWindow, r: Result<Status, String>) {
             apply_status(w, &Status::default());
             w.set_app_missing(false);
             w.set_has_update(false);
-            w.set_updater_ausente(true);
+            w.set_gestor_ausente(true);
             w.set_action_label("Instalar".into());
-            w.set_status_line(format!("sem contato com o updater — {e}").into());
+            w.set_status_line(format!("sem contato com o gestor — {e}").into());
         }
     }
 }
@@ -179,7 +249,7 @@ fn semver_gt(a: &str, b: &str) -> bool {
 /// Aplica um Status na janela.
 fn apply_status(w: &MainWindow, s: &Status) {
     let dash = |v: &str| if v.is_empty() { "—".to_string() } else { v.to_string() };
-    w.set_updater_ver(dash(&s.updater_ver).into());
+    w.set_gestor_ver(dash(&s.gestor_ver).into());
     w.set_app_installed(dash(&s.app_installed).into());
     w.set_app_latest(dash(&s.app_latest).into());
     w.set_platform(dash(&s.platform).into());
@@ -219,7 +289,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(w) = weak.upgrade() else { return };
             let subcmd = if w.get_app_missing() { "install" } else { "update" };
             w.set_busy(true);
-            w.set_log(format!("$ schematize-updater {subcmd}\n").into());
+            w.set_log(format!("$ schematize-market {subcmd}\n").into());
             w.set_status_line(
                 "baixando/compilando — isso pode levar alguns minutos na 1ª vez…".into(),
             );
@@ -244,7 +314,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // ---- Abrir app ----
     {
         w.on_do_launch(move || {
-            let _ = Command::new(updater_bin())
+            let _ = Command::new(gestor_bin())
                 .arg("run")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -277,10 +347,10 @@ fn main() -> Result<(), slint::PlatformError> {
     w.run()
 }
 
-/// Roda `schematize-updater <subcmd>` com stdout+stderr canalizados, empurrando cada linha pro log
+/// Roda `schematize-market <subcmd>` com stdout+stderr canalizados, empurrando cada linha pro log
 /// da janela (via event loop). Mantém só a cauda do log pra não crescer sem limite.
 fn run_streaming(subcmd: &str, weak: slint::Weak<MainWindow>) {
-    let mut child = match Command::new(updater_bin())
+    let mut child = match Command::new(gestor_bin())
         .arg(subcmd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -337,63 +407,94 @@ fn push_log(weak: &slint::Weak<MainWindow>, line: String) {
 mod tests {
     use super::*;
 
-    /// Saída típica do `schematize-updater status`, com todos os rótulos.
-    const SAIDA: &str = "\
-schematize-updater: 0.6.2
-plataforma: linux-x86_64
-binário pronto?: sim
-app instalado: 0.55.0
-última publicada: 0.55.2
-dir de instalação: /home/u/.cargo/bin
-versão fixada (pin): nenhuma
-";
+    /// Saída típica do `schematize-market status --json` — o CONTRATO, copiado do que o
+    /// market de fato emite (travado do lado de lá por `o_shape_do_json_e_contrato`).
+    const SAIDA: &str = r#"{
+  "market": "0.2.0",
+  "os": "linux",
+  "arch": "x86_64",
+  "prebuilt": true,
+  "app_installed": "0.55.0",
+  "app_latest": "0.55.2",
+  "pin": null,
+  "install_dir": "/home/u/.cargo/bin",
+  "apps": [
+    {"bin": "schematize-deployer", "repo": "schematizeme/schematize_deployer_rs", "installed": "0.5.0", "latest": "0.5.0"}
+  ]
+}"#;
 
-    /// O parse pega cada rótulo, e o `has_update` sai da comparação de versões.
+    /// Cada chave chega no campo certo, e o `has_update` sai da comparação de versões.
     #[test]
-    fn parse_le_todos_os_rotulos() {
-        let s = parse_status(SAIDA);
-        assert_eq!(s.updater_ver, "0.6.2");
-        assert_eq!(s.platform, "linux-x86_64");
+    fn le_todas_as_chaves_do_contrato() {
+        let s = parse_json(SAIDA);
+        assert_eq!(s.gestor_ver, "0.2.0");
+        assert_eq!(s.platform, "linux / x86_64");
         assert_eq!(s.binready, "sim");
         assert_eq!(s.app_installed, "0.55.0");
         assert_eq!(s.app_latest, "0.55.2");
         assert_eq!(s.instdir, "/home/u/.cargo/bin");
-        assert_eq!(s.pin, "nenhuma");
+        assert_eq!(s.pin, "", "`null` e ausencia de pin, nao a palavra null");
         assert!(!s.app_missing, "o app está instalado");
         assert!(s.has_update, "0.55.0 -> 0.55.2 é atualização");
     }
 
-    /// O rótulo do interregno (nome Overflow) tem que ser lido igual — uma máquina que
-    /// instalou naquela janela ainda tem o binário antigo respondendo.
+    /// **O BUG QUE ESTA JANELA TINHA, e que o `--json` conserta.**
+    ///
+    /// A versão anterior casava rótulos EM PORTUGUÊS (`"plataforma"`, `"app instalado"`). O
+    /// `status` do market passa pelo catálogo i18n, então em qualquer um dos outros dezenove
+    /// idiomas os rótulos são outros — e o parse devolvia tudo vazio, **sem erro**. Com os
+    /// campos vazios, `app_missing` virava `true` e a janela afirmava "app não instalado" a
+    /// quem tinha o app instalado.
+    ///
+    /// O JSON não tem esse problema por construção: as chaves nunca são traduzidas. Este teste
+    /// prova isso passando a MESMA informação com os valores em outro idioma — o que muda é a
+    /// prosa, não o contrato.
     #[test]
-    fn rotulo_antigo_do_updater_e_lido() {
-        assert_eq!(parse_status("overflow-updater: 0.2.3\n").updater_ver, "0.2.3");
+    fn o_contrato_nao_depende_do_idioma() {
+        let outro = r#"{"market":"0.2.0","os":"linux","arch":"x86_64","prebuilt":false,
+                        "app_installed":"1.0.0","app_latest":"1.0.0","pin":null,
+                        "install_dir":"/inicio/u/.cargo/bin","apps":[]}"#;
+        let s = parse_json(outro);
+        assert_eq!(s.app_installed, "1.0.0", "a leitura não pode depender de idioma nenhum");
+        assert_eq!(s.binready, "não");
+        assert!(!s.app_missing, "o app ESTÁ instalado — dizer o contrário foi o bug");
     }
 
-    /// App ausente: os três jeitos de o updater dizer "não tem".
+    /// App ausente: as formas de o gestor dizer "não tem".
     #[test]
     fn app_ausente_em_qualquer_das_formas() {
-        for v in ["", "nenhum", "—"] {
-            let s = parse_status(&format!("app instalado: {v}\núltima publicada: 1.0.0\n"));
-            assert!(s.app_missing, "{v:?} tinha que contar como ausente");
+        for v in [r#""""#, r#""nenhum""#, r#""—""#, "null"] {
+            let s = parse_json(&format!(r#"{{"app_installed":{v},"app_latest":"1.0.0"}}"#));
+            assert!(s.app_missing, "{v} tinha que contar como ausente");
             assert!(!s.has_update, "app ausente não é 'tem update', é 'instalar'");
         }
     }
 
-    /// Linha sem `:` e rótulo desconhecido são ignorados sem estragar o resto.
+    /// Chave ausente, JSON truncado e lixo não derrubam o parse nem inventam dado.
     #[test]
-    fn lixo_na_saida_nao_derruba_o_parse() {
-        let s = parse_status("isto nao tem dois pontos\ndesconhecido: 9\napp instalado: 1.2.3\n");
+    fn shape_inesperado_nao_derruba_nem_inventa() {
+        let s = parse_json(r#"{"app_installed":"1.2.3"}"#);
         assert_eq!(s.app_installed, "1.2.3");
+        assert_eq!(s.instdir, "", "chave ausente não pode virar valor de outra");
+
+        assert_eq!(parse_json(r#"{"app_installed":"1.2"#).app_installed, "");
+        assert_eq!(parse_json("isto nao e json").app_installed, "");
+    }
+
+    /// Escape de aspas e de barra no valor — `install_dir` no Windows tem barras invertidas.
+    #[test]
+    fn valores_com_escape_sao_lidos() {
+        let s = parse_json(r#"{"install_dir":"C:\\Users\\u\\.cargo\\bin"}"#);
+        assert_eq!(s.instdir, r"C:\Users\u\.cargo\bin");
     }
 
     /// Entrada vazia não pode virar afirmação sobre o app.
     ///
     /// Ela ainda marca `app_missing` — e é por isso que [`read_status`] devolve `Result`:
-    /// quem não conseguiu FALAR com o updater não passa por aqui, passa pelo `Err`.
+    /// quem não conseguiu FALAR com o gestor não passa por aqui, passa pelo `Err`.
     #[test]
     fn saida_vazia_marca_ausente_mas_nao_ve_update() {
-        let s = parse_status("");
+        let s = parse_json("");
         assert!(s.app_missing);
         assert!(!s.has_update, "sem dado nenhum não existe atualização a oferecer");
     }
@@ -423,7 +524,7 @@ versão fixada (pin): nenhuma
         assert_eq!(strip_v(""), "");
     }
 
-    /// **O bug que estes testes existem pra travar.** `updater_bin()` aponta pro PATH quando
+    /// **O bug que estes testes existem pra travar.** `gestor_bin()` aponta pro PATH quando
     /// não acha nada; se aquele binário não existe, `read_status` tem que dar `Err` — não
     /// devolver um `Status` vazio, que a janela leria como "app não instalado".
     #[test]
@@ -431,7 +532,7 @@ versão fixada (pin): nenhuma
         // Não dá pra tirar o updater do PATH sem mexer em estado global do processo. O que
         // dá — e é o que importa — é provar que o caminho de erro NÃO passa pelo parse: um
         // `Status` só nasce de texto que o updater realmente imprimiu.
-        let vazio = parse_status("");
+        let vazio = parse_json("");
         assert!(vazio.app_missing, "o parse de vazio marca ausente…");
         // …e por isso `read_status` não pode devolver ISTO quando falha em executar.
         // A assinatura é a prova estrutural: `Result<Status, String>`.
@@ -439,16 +540,22 @@ versão fixada (pin): nenhuma
         assina(read_status);
     }
 
-    /// O nome do executável do updater conhece o Windows — mesma lição do D10 no CLI.
+    /// O nome do executável do gestor conhece o Windows — mesma lição do D10 no CLI.
+    ///
+    /// **E ele é `schematize-market`, não `schematize-updater` (ADR-0013/0014).** A asserção do
+    /// nome está aqui de propósito: esta janela existe para falar com o gestor, e apontar para
+    /// o binário APOSENTADO seria conversar com um programa congelado que desfaria o que o
+    /// market acabou de fazer. Nome errado aqui não dá erro — dá estrago silencioso.
     #[test]
-    fn nome_do_binario_por_plataforma() {
-        let p = updater_bin();
+    fn nome_do_binario_por_plataforma_e_do_gestor_certo() {
+        let p = gestor_bin();
         let nome = p.file_name().unwrap().to_string_lossy().into_owned();
         if cfg!(windows) {
             assert!(nome.ends_with(".exe"), "no Windows o binário é .exe: {nome}");
         } else {
             assert!(!nome.ends_with(".exe"), "fora do Windows não tem .exe: {nome}");
         }
-        assert!(nome.contains("updater"), "{nome}");
+        assert!(nome.starts_with("schematize-market"), "o dono mudou (ADR-0013): {nome}");
+        assert!(!nome.contains("updater"), "o updater foi aposentado: {nome}");
     }
 }

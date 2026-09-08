@@ -1,5 +1,5 @@
 // Janela do gestor de atualizações do schematize. Casca visual fina: todos os dados vêm do binário
-// `schematize-updater` (headless) e todas as ações disparam callbacks tratados no main.rs. Tokens de
+// `schematize-market` (headless) e todas as ações disparam callbacks tratados no main.rs. Tokens de
 // tema copiados da GUI principal (dark ótimo intacto; light rebalanceado pra contraste) pra ficar
 // visualmente consistente com o app.
 
@@ -78,7 +78,7 @@ export component MainWindow inherits Window {
     background: Th.bg;
 
     in-out property <bool> dark <=> Th.dark;
-    in-out property <string> updater-ver: "—";
+    in-out property <string> gestor-ver: "—";
     in-out property <string> app-installed: "—";
     in-out property <string> app-latest: "—";
     in-out property <string> platform: "—";
@@ -87,9 +87,9 @@ export component MainWindow inherits Window {
     in-out property <string> pin: "";
     in-out property <bool> has-update: false;
     in-out property <bool> app-missing: false;
-    // Sem contato com o `schematize-updater`: NÃO é o mesmo que "app não instalado", e a
+    // Sem contato com o `schematize-market`: NÃO é o mesmo que "app não instalado", e a
     // janela não pode afirmar uma coisa quando o que houve foi a outra.
-    in-out property <bool> updater-ausente: false;
+    in-out property <bool> gestor-ausente: false;
     in-out property <bool> busy: false;
     in-out property <string> action-label: "Atualizar";
     in-out property <string> status-line: "";
@@ -115,7 +115,7 @@ export component MainWindow inherits Window {
                     font-weight: 800;
                 }
                 Text {
-                    text: "schematize-updater " + root.updater-ver + "  ·  " + root.platform;
+                    text: "schematize-market " + root.gestor-ver + "  ·  " + root.platform;
                     color: Th.text-dim;
                     font-size: 12px;
                 }
@@ -126,12 +126,12 @@ export component MainWindow inherits Window {
                 spacing: 8px;
                 Rectangle {
                     width: 10px; height: 10px; border-radius: 5px;
-                    background: root.updater-ausente ? Th.warn
+                    background: root.gestor-ausente ? Th.warn
                         : (root.app-missing ? Th.warn : (root.has-update ? Th.accent : Th.good));
                 }
                 Text {
                     vertical-alignment: center;
-                    text: root.updater-ausente ? "sem contato com o updater"
+                    text: root.gestor-ausente ? "sem contato com o gestor"
                         : root.app-missing ? "app não instalado"
                         : (root.has-update ? "atualização disponível" : "em dia");
                     color: Th.text;
