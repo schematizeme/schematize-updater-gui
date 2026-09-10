@@ -25,181 +25,20 @@
 //! mentira: passa no teste de quem escreveu e falha na máquina de quem usa.
 #![windows_subsystem = "windows"]
 
-use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::cell::RefCell;
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod gestor;
+mod json;
+mod mercado;
+mod terminal;
+
 slint::include_modules!();
 
-/// Estado lido do `schematize-updater status`.
-#[derive(Default, Clone)]
-struct Status {
-    gestor_ver: String,
-    app_installed: String,
-    app_latest: String,
-    platform: String,
-    binready: String,
-    instdir: String,
-    pin: String,
-    app_missing: bool,
-    has_update: bool,
-}
-
-/// Resolve o binário do GESTOR: ao lado deste executável → ~/.cargo/bin → PATH. Assim funciona
-/// mesmo lançado pelo menu do desktop (cujo PATH não tem ~/.cargo/bin) — mesma lição do launcher.
-///
-/// **Só o `schematize-market`, e de propósito.** A lista antiga trazia `schematize-updater` e
-/// o nome do interregno como rede. Os dois estão aposentados: o updater foi absorvido
-/// (ADR-0013) e é REMOVIDO pelo market e pelo `install.sh` ao assumir. Manter o fallback faria
-/// a janela conversar com um gestor congelado numa máquina em transição — e o que ele fizesse
-/// desfaria o que o market acabou de fazer. Sem backend é um erro visível; com o backend
-/// errado é um estrago silencioso.
-fn gestor_bin() -> PathBuf {
-    let names: [&str; 1] =
-        if cfg!(windows) { ["schematize-market.exe"] } else { ["schematize-market"] };
-    let name = names[0];
-    // 1) ao lado de mim (instalação canônica em ~/.cargo/bin junto do gui).
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for n in names {
-                let c = dir.join(n);
-                if c.is_file() {
-                    return c;
-                }
-            }
-        }
-    }
-    // 2) ~/.cargo/bin.
-    if let Some(home) = home_dir() {
-        for n in names {
-            let c = home.join(".cargo").join("bin").join(n);
-            if c.is_file() {
-                return c;
-            }
-        }
-    }
-    // 3) confia no PATH.
-    PathBuf::from(name)
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-}
-
-/// Roda `schematize-market status --json` e devolve o `Status`, ou POR QUE não deu.
-///
-/// **Onde:** na abertura da janela e depois de cada ação (`refresh`, fim do install).
-///
-/// **Por que devolve `Result` e não um `Status` vazio:** a versão anterior engolia a falha
-/// (`_ => return s`) e devolvia o `Status::default()`. Com os campos vazios, `app_missing`
-/// virava `true` e a janela afirmava **"app não instalado"** — quando a verdade era "não
-/// consegui falar com o gestor". A pessoa então clicava em "Instalar", que chama o mesmo
-/// binário ausente, e nada acontecia. Estado de erro renderizado como fato é pior que erro
-/// visível: manda a pessoa consertar o problema errado.
-fn read_status() -> Result<Status, String> {
-    let bin = gestor_bin();
-    let out = Command::new(&bin)
-        .args(["status", "--json"])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("não consegui executar {}: {e}", bin.display()))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err = err.trim();
-        return Err(format!(
-            "{} status falhou ({}){}",
-            bin.display(),
-            out.status,
-            if err.is_empty() { String::new() } else { format!(": {err}") }
-        ));
-    }
-    Ok(parse_json(&String::from_utf8_lossy(&out.stdout)))
-}
-
-/// Lê o JSON do `schematize-market status --json`.
-///
-/// **Onde:** [`read_status`], e os testes — é a metade que não toca em processo nenhum, e por
-/// isso a única que dá para exercitar sem o gestor instalado na máquina.
-///
-/// **Por que um leitor de JSON à mão, e não `serde_json`:** esta janela é `std`-only de
-/// propósito. Ela é a interface que tem de abrir **quando o resto está quebrado** — primeira
-/// instalação, app corrompido, toolchain incompleto. Cada dependência que ela ganha é uma
-/// chance a mais de ela não compilar justamente na máquina onde ela é a única coisa que
-/// funciona. O contrato tem nove chaves de topo, todas planas; ler isso custa esta função.
-///
-/// **O que ele NÃO tenta ser:** um parser de JSON. Ele lê o shape que o market emite, que é
-/// fixo e travado por teste do lado de lá (`o_shape_do_json_e_contrato`). JSON arbitrário —
-/// aninhado, com escapes exóticos — não é entrada esperada aqui, e o resultado de um shape
-/// inesperado é campo vazio, nunca pânico.
-fn parse_json(text: &str) -> Status {
-    let mut s = Status::default();
-    let campo = |k: &str| valor_de(text, k).unwrap_or_default();
-
-    s.gestor_ver = campo("market");
-    s.app_installed = campo("app_installed");
-    s.app_latest = campo("app_latest");
-    s.instdir = campo("install_dir");
-    s.pin = campo("pin");
-
-    s.platform = match (valor_de(text, "os"), valor_de(text, "arch")) {
-        (Some(o), Some(a)) => format!("{o} / {a}"),
-        (Some(o), None) => o,
-        _ => String::new(),
-    };
-    s.binready = match booleano_de(text, "prebuilt") {
-        Some(true) => "sim".into(),
-        Some(false) => "não".into(),
-        None => String::new(),
-    };
-
-    s.app_missing =
-        s.app_installed.is_empty() || s.app_installed == "nenhum" || s.app_installed == "—";
-    s.has_update = !s.app_missing && semver_gt(strip_v(&s.app_latest), strip_v(&s.app_installed));
-    s
-}
-
-/// **O quê:** o valor de string de uma chave de topo. `None` se ausente ou `null`.
-/// **Onde:** [`parse_json`].
-///
-/// Procura `"chave"` seguido de `:` e de aspas. `null` (sem aspas) devolve `None` — é como o
-/// market diz "não há pin", e tratá-lo como a string `"null"` mostraria a palavra na tela.
-fn valor_de(text: &str, chave: &str) -> Option<String> {
-    let marca = format!("\"{chave}\"");
-    let i = text.find(&marca)? + marca.len();
-    let resto = text[i..].trim_start().strip_prefix(':')?.trim_start();
-    if resto.starts_with("null") {
-        return None;
-    }
-    let resto = resto.strip_prefix('"')?;
-    let mut out = String::new();
-    let mut chars = resto.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => out.push(chars.next()?),
-            '"' => return Some(out),
-            _ => out.push(c),
-        }
-    }
-    None
-}
-
-/// **O quê:** o valor booleano de uma chave de topo. **Onde:** [`parse_json`], para `prebuilt`.
-fn booleano_de(text: &str, chave: &str) -> Option<bool> {
-    let marca = format!("\"{chave}\"");
-    let i = text.find(&marca)? + marca.len();
-    let resto = text[i..].trim_start().strip_prefix(':')?.trim_start();
-    if resto.starts_with("true") {
-        Some(true)
-    } else if resto.starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
-}
+use gestor::{gestor_bin, read_status, run_streaming, Status};
 
 /// Aplica na janela o resultado de [`read_status`] — inclusive quando ele é `Err`.
 ///
@@ -226,26 +65,6 @@ fn aplicar_leitura(w: &MainWindow, r: Result<Status, String>) {
     }
 }
 
-fn strip_v(s: &str) -> &str {
-    s.trim().trim_start_matches('v')
-}
-
-/// `a > b` em semver simples (major.minor.patch). Partes não-numéricas → 0. Não-versões → false.
-fn semver_gt(a: &str, b: &str) -> bool {
-    let pa: Vec<u64> = a.split('.').map(|x| x.parse().unwrap_or(0)).collect();
-    let pb: Vec<u64> = b.split('.').map(|x| x.parse().unwrap_or(0)).collect();
-    if pa.iter().all(|&n| n == 0) || pb.iter().all(|&n| n == 0) {
-        return false; // uma delas não é versão (ex.: "? (rede)")
-    }
-    for i in 0..pa.len().max(pb.len()) {
-        let (x, y) = (pa.get(i).copied().unwrap_or(0), pb.get(i).copied().unwrap_or(0));
-        if x != y {
-            return x > y;
-        }
-    }
-    false
-}
-
 /// Aplica um Status na janela.
 fn apply_status(w: &MainWindow, s: &Status) {
     let dash = |v: &str| if v.is_empty() { "—".to_string() } else { v.to_string() };
@@ -270,8 +89,32 @@ fn apply_status(w: &MainWindow, s: &Status) {
     );
 }
 
+/// **O quê:** a aba em que a janela abre, lida da linha de comando.
+///
+/// **Onde:** [`main`]. `--mercado` abre no Mercado; sem argumento, em Atualizações.
+///
+/// **Por que existe:** a aba "Mercado" do hub abre ESTA janela. Sem o argumento, quem clica
+/// em "Mercado" lá cai em "Atualizações" aqui e tem de clicar de novo — um clique a mais para
+/// chegar onde já tinha pedido para ir. O ícone do desktop, esse, abre sem argumento: quem
+/// clica nele não pediu tela nenhuma em especial, e a de atualizações é a que responde à
+/// pergunta mais comum.
+///
+/// **Argumento desconhecido não é erro.** Esta janela é a interface que abre quando o resto
+/// está quebrado; sair com erro por causa de uma flag que alguém digitou errado seria trocar
+/// uma janela que funciona por nenhuma.
+fn aba_inicial(args: impl Iterator<Item = String>) -> i32 {
+    for a in args {
+        if a == "--mercado" || a == "--market" {
+            return 1;
+        }
+    }
+    0
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let w = MainWindow::new()?;
+    let aba = aba_inicial(std::env::args().skip(1));
+    w.set_aba(aba);
 
     // Carrega o status inicial.
     aplicar_leitura(&w, read_status());
@@ -334,6 +177,74 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // ---- ABA MERCADO ----
+    //
+    // O estado das linhas vive num `Rc<RefCell<…>>` compartilhado entre os quatro callbacks:
+    // escolher método muda uma linha, instalar/remover leem a linha escolhida, e recarregar
+    // troca a lista inteira. Sem um dono único, cada callback teria a sua cópia e o método
+    // escolhido num não existiria no outro.
+    let linhas: Rc<RefCell<Vec<mercado::Linha>>> = Rc::new(RefCell::new(Vec::new()));
+
+    {
+        let weak = w.as_weak();
+        let linhas = linhas.clone();
+        w.on_mercado_recarregar(move || {
+            let Some(w) = weak.upgrade() else { return };
+            w.set_mercado_carregando(true);
+            let r = ler_mercado();
+            match r {
+                Ok(v) => {
+                    w.set_mercado_erro(slint::SharedString::new());
+                    *linhas.borrow_mut() = v;
+                }
+                Err(e) => {
+                    // O erro vira TELA, e a lista fica vazia — mas quem desenha olha o erro
+                    // primeiro. Lista vazia sem erro diria "o mercado não tem nada", que é uma
+                    // afirmação, e falsa.
+                    w.set_mercado_erro(e.into());
+                    linhas.borrow_mut().clear();
+                }
+            }
+            aplicar_linhas(&w, &linhas.borrow());
+            w.set_mercado_carregando(false);
+        });
+    }
+
+    {
+        let weak = w.as_weak();
+        let linhas = linhas.clone();
+        w.on_mercado_escolher_metodo(move |i, m| {
+            let Some(w) = weak.upgrade() else { return };
+            {
+                let mut v = linhas.borrow_mut();
+                // Índice fora da lista é possível: a tela pode ter sido redesenhada entre o
+                // clique e este callback. `get_mut` devolve `None` em vez de panicar — e uma
+                // janela que morre no clique é pior que um clique que não faz nada.
+                let Some(l) = v.get_mut(i as usize) else { return };
+                l.metodo_sel = m.to_string();
+            }
+            aplicar_linhas(&w, &linhas.borrow());
+        });
+    }
+
+    {
+        let weak = w.as_weak();
+        let linhas = linhas.clone();
+        w.on_mercado_instalar(move |i| {
+            let Some(w) = weak.upgrade() else { return };
+            acao_de_mercado(&w, &linhas, i, "install");
+        });
+    }
+
+    {
+        let weak = w.as_weak();
+        let linhas = linhas.clone();
+        w.on_mercado_remover(move |i| {
+            let Some(w) = weak.upgrade() else { return };
+            acao_de_mercado(&w, &linhas, i, "remove");
+        });
+    }
+
     // ---- Alternar tema ----
     {
         let weak = w.as_weak();
@@ -344,218 +255,134 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // Aberta direto no Mercado (o hub passa `--mercado`): a leitura é disparada aqui, porque
+    // quem a dispararia é o CLIQUE na aba — e esse clique não vai acontecer. Sem isto a tela
+    // nasceria vazia, e vazia sem erro é a janela dizendo "o mercado não tem nada".
+    if aba == 1 {
+        w.invoke_mercado_recarregar();
+    }
+
     w.run()
 }
 
-/// Roda `schematize-market <subcmd>` com stdout+stderr canalizados, empurrando cada linha pro log
-/// da janela (via event loop). Mantém só a cauda do log pra não crescer sem limite.
-fn run_streaming(subcmd: &str, weak: slint::Weak<MainWindow>) {
-    let mut child = match Command::new(gestor_bin())
-        .arg(subcmd)
+/// **O quê:** roda `schematize-market list --json` e devolve as linhas da aba do Mercado.
+///
+/// **Onde:** o callback de recarregar.
+///
+/// **Os dois modos de falha viram a MESMA tela, e ambos dizem o que houve:** não consegui
+/// executar o gestor, e executei mas não entendi a resposta. Nenhum deles pode virar "lista
+/// vazia" — a pessoa leria isso como "o mercado não tem nada", que é uma afirmação, e falsa.
+/// É a mesma distinção entre "não sei" e "não tem" que já quebrou esta janela uma vez.
+fn ler_mercado() -> Result<Vec<mercado::Linha>, String> {
+    let bin = gestor_bin();
+    let out = Command::new(&bin)
+        .args(["list", "--json"])
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            push_log(&weak, format!("erro: não consegui executar o updater: {e}\n"));
-            return;
-        }
-    };
-
-    // stderr numa thread; stdout na atual — as duas empurram pro mesmo log.
-    let stderr = child.stderr.take();
-    let weak_err = weak.clone();
-    let err_handle = std::thread::spawn(move || {
-        if let Some(err) = stderr {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
-                push_log(&weak_err, format!("{line}\n"));
-            }
-        }
-    });
-
-    if let Some(out) = child.stdout.take() {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            push_log(&weak, format!("{line}\n"));
-        }
+        .output()
+        .map_err(|e| format!("não consegui executar {}: {e}", bin.display()))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim();
+        return Err(format!(
+            "{} list falhou ({}){}",
+            bin.display(),
+            out.status,
+            if err.is_empty() { String::new() } else { format!(": {err}") }
+        ));
     }
-    let _ = err_handle.join();
-    match child.wait() {
-        Ok(st) if st.success() => push_log(&weak, "\n✓ concluído.\n".into()),
-        Ok(st) => push_log(&weak, format!("\n✗ falhou ({st}).\n")),
-        Err(e) => push_log(&weak, format!("\n✗ erro ao esperar o processo: {e}\n")),
-    }
+    mercado::ler(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Anexa `line` ao log da janela pelo event loop, limitando ao tail (~20k chars).
-fn push_log(weak: &slint::Weak<MainWindow>, line: String) {
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(w) = weak.upgrade() {
-            let mut s = w.get_log().to_string();
-            s.push_str(&line);
-            if s.len() > 20_000 {
-                s = s[s.len() - 20_000..].to_string();
-            }
-            w.set_log(s.into());
+/// **O quê:** joga as linhas do Rust para o modelo que a tela desenha.
+///
+/// **Onde:** depois de recarregar, de escolher método e de disparar uma ação.
+///
+/// Reconstrói o modelo inteiro em vez de mexer numa linha só: são algumas dezenas de itens, e
+/// um modelo que se atualiza por partes é onde nasce a divergência entre o que o Rust acha que
+/// está na tela e o que está.
+fn aplicar_linhas(w: &MainWindow, linhas: &[mercado::Linha]) {
+    let modelo: Vec<LinhaMercado> = linhas
+        .iter()
+        .map(|l| LinhaMercado {
+            slug: l.slug.clone().into(),
+            display: l.display.clone().into(),
+            categoria: l.categoria.clone().into(),
+            metodos: slint::ModelRc::new(slint::VecModel::from(
+                l.metodos.iter().map(slint::SharedString::from).collect::<Vec<_>>(),
+            )),
+            metodo_sel: l.metodo_sel.clone().into(),
+            dica: l.dica.clone().into(),
+            instalado: l.instalado,
+            status_texto: l.status_texto.clone().into(),
+            titulo_secao: l.titulo_secao.clone().into(),
+            op_rotulo: l.op_rotulo.clone().into(),
+        })
+        .collect();
+    w.set_mercado_linhas(slint::ModelRc::new(slint::VecModel::from(modelo)));
+}
+
+/// **O quê:** dispara `install`/`remove` de uma linha num TERMINAL, e marca a linha com o que
+/// aconteceu.
+///
+/// **Onde:** os dois botões da aba do Mercado.
+///
+/// **Sem terminal a janela NÃO some com o problema:** ela põe o comando na própria linha, para
+/// a pessoa rodar onde quiser. Um botão que não faz nada e não diz nada é o que o §37.48 chama
+/// de bug do software.
+fn acao_de_mercado(w: &MainWindow, linhas: &Rc<RefCell<Vec<mercado::Linha>>>, i: i32, acao: &str) {
+    let gestor = gestor_bin().display().to_string();
+    let rotulo = {
+        let mut v = linhas.borrow_mut();
+        let Some(l) = v.get_mut(i as usize) else { return };
+        let cmd = mercado::comando(&gestor, acao, &l.slug, &l.metodo_sel);
+        if terminal::abrir(&cmd) {
+            "terminal aberto".to_string()
+        } else {
+            let metodo = if l.metodo_sel.is_empty() {
+                String::new()
+            } else {
+                format!(" --method {}", l.metodo_sel)
+            };
+            format!("rode: {gestor} {acao} {}{metodo}", l.slug)
         }
-    });
+    };
+    {
+        let mut v = linhas.borrow_mut();
+        if let Some(l) = v.get_mut(i as usize) {
+            l.op_rotulo = rotulo;
+        }
+    }
+    aplicar_linhas(w, &linhas.borrow());
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests_aba {
+    use super::aba_inicial;
 
-    /// Saída típica do `schematize-market status --json` — o CONTRATO, copiado do que o
-    /// market de fato emite (travado do lado de lá por `o_shape_do_json_e_contrato`).
-    const SAIDA: &str = r#"{
-  "market": "0.2.0",
-  "os": "linux",
-  "arch": "x86_64",
-  "prebuilt": true,
-  "app_installed": "0.55.0",
-  "app_latest": "0.55.2",
-  "pin": null,
-  "install_dir": "/home/u/.cargo/bin",
-  "apps": [
-    {"bin": "schematize-deployer", "repo": "schematizeme/schematize_deployer_rs", "installed": "0.5.0", "latest": "0.5.0"}
-  ]
-}"#;
-
-    /// Cada chave chega no campo certo, e o `has_update` sai da comparação de versões.
+    /// Sem argumento, a janela abre em Atualizações — é a tela que responde à pergunta mais
+    /// comum de quem clicou no ícone sem pedir nada em especial.
     #[test]
-    fn le_todas_as_chaves_do_contrato() {
-        let s = parse_json(SAIDA);
-        assert_eq!(s.gestor_ver, "0.2.0");
-        assert_eq!(s.platform, "linux / x86_64");
-        assert_eq!(s.binready, "sim");
-        assert_eq!(s.app_installed, "0.55.0");
-        assert_eq!(s.app_latest, "0.55.2");
-        assert_eq!(s.instdir, "/home/u/.cargo/bin");
-        assert_eq!(s.pin, "", "`null` e ausencia de pin, nao a palavra null");
-        assert!(!s.app_missing, "o app está instalado");
-        assert!(s.has_update, "0.55.0 -> 0.55.2 é atualização");
+    fn sem_argumento_abre_em_atualizacoes() {
+        assert_eq!(aba_inicial(std::iter::empty()), 0);
     }
 
-    /// **O BUG QUE ESTA JANELA TINHA, e que o `--json` conserta.**
-    ///
-    /// A versão anterior casava rótulos EM PORTUGUÊS (`"plataforma"`, `"app instalado"`). O
-    /// `status` do market passa pelo catálogo i18n, então em qualquer um dos outros dezenove
-    /// idiomas os rótulos são outros — e o parse devolvia tudo vazio, **sem erro**. Com os
-    /// campos vazios, `app_missing` virava `true` e a janela afirmava "app não instalado" a
-    /// quem tinha o app instalado.
-    ///
-    /// O JSON não tem esse problema por construção: as chaves nunca são traduzidas. Este teste
-    /// prova isso passando a MESMA informação com os valores em outro idioma — o que muda é a
-    /// prosa, não o contrato.
+    /// `--mercado` abre no Mercado. É o que o hub passa quando alguém clica na aba de lá: sem
+    /// isto, a pessoa pediria "Mercado" e cairia em "Atualizações".
     #[test]
-    fn o_contrato_nao_depende_do_idioma() {
-        let outro = r#"{"market":"0.2.0","os":"linux","arch":"x86_64","prebuilt":false,
-                        "app_installed":"1.0.0","app_latest":"1.0.0","pin":null,
-                        "install_dir":"/inicio/u/.cargo/bin","apps":[]}"#;
-        let s = parse_json(outro);
-        assert_eq!(s.app_installed, "1.0.0", "a leitura não pode depender de idioma nenhum");
-        assert_eq!(s.binready, "não");
-        assert!(!s.app_missing, "o app ESTÁ instalado — dizer o contrário foi o bug");
-    }
-
-    /// App ausente: as formas de o gestor dizer "não tem".
-    #[test]
-    fn app_ausente_em_qualquer_das_formas() {
-        for v in [r#""""#, r#""nenhum""#, r#""—""#, "null"] {
-            let s = parse_json(&format!(r#"{{"app_installed":{v},"app_latest":"1.0.0"}}"#));
-            assert!(s.app_missing, "{v} tinha que contar como ausente");
-            assert!(!s.has_update, "app ausente não é 'tem update', é 'instalar'");
+    fn mercado_abre_no_mercado() {
+        for flag in ["--mercado", "--market"] {
+            assert_eq!(aba_inicial([flag.to_string()].into_iter()), 1, "{flag}");
         }
+        // Entre outros argumentos, também.
+        assert_eq!(aba_inicial(["-x".to_string(), "--mercado".to_string()].into_iter()), 1);
     }
 
-    /// Chave ausente, JSON truncado e lixo não derrubam o parse nem inventam dado.
+    /// **Argumento desconhecido NÃO derruba a janela.** Ela é a interface que abre quando o
+    /// resto está quebrado; sair com erro por uma flag digitada errado seria trocar uma janela
+    /// que funciona por nenhuma.
     #[test]
-    fn shape_inesperado_nao_derruba_nem_inventa() {
-        let s = parse_json(r#"{"app_installed":"1.2.3"}"#);
-        assert_eq!(s.app_installed, "1.2.3");
-        assert_eq!(s.instdir, "", "chave ausente não pode virar valor de outra");
-
-        assert_eq!(parse_json(r#"{"app_installed":"1.2"#).app_installed, "");
-        assert_eq!(parse_json("isto nao e json").app_installed, "");
-    }
-
-    /// Escape de aspas e de barra no valor — `install_dir` no Windows tem barras invertidas.
-    #[test]
-    fn valores_com_escape_sao_lidos() {
-        let s = parse_json(r#"{"install_dir":"C:\\Users\\u\\.cargo\\bin"}"#);
-        assert_eq!(s.instdir, r"C:\Users\u\.cargo\bin");
-    }
-
-    /// Entrada vazia não pode virar afirmação sobre o app.
-    ///
-    /// Ela ainda marca `app_missing` — e é por isso que [`read_status`] devolve `Result`:
-    /// quem não conseguiu FALAR com o gestor não passa por aqui, passa pelo `Err`.
-    #[test]
-    fn saida_vazia_marca_ausente_mas_nao_ve_update() {
-        let s = parse_json("");
-        assert!(s.app_missing);
-        assert!(!s.has_update, "sem dado nenhum não existe atualização a oferecer");
-    }
-
-    /// Comparação de versões: os casos que decidem se o botão diz "Atualizar".
-    #[test]
-    fn semver_compara_o_que_importa() {
-        assert!(semver_gt("0.55.2", "0.55.1"));
-        assert!(semver_gt("1.0.0", "0.99.99"));
-        assert!(semver_gt("0.6.0", "0.5.9"));
-        assert!(!semver_gt("0.55.1", "0.55.1"), "igual não é maior");
-        assert!(!semver_gt("0.55.0", "0.55.1"), "menor não é maior");
-        // Campo que não é versão (o updater imprime "? (rede)" quando não alcança a rede)
-        // nunca pode virar "tem atualização".
-        assert!(!semver_gt("? (rede)", "0.55.1"));
-        assert!(!semver_gt("0.55.1", "? (rede)"));
-        // Número de partes diferente.
-        assert!(semver_gt("1.1", "1.0.9"));
-        assert!(!semver_gt("1.0", "1.0.0"));
-    }
-
-    /// O `v` da tag é aparado dos dois lados antes de comparar.
-    #[test]
-    fn strip_v_apara_tag_e_espaco() {
-        assert_eq!(strip_v(" v1.2.3 "), "1.2.3");
-        assert_eq!(strip_v("1.2.3"), "1.2.3");
-        assert_eq!(strip_v(""), "");
-    }
-
-    /// **O bug que estes testes existem pra travar.** `gestor_bin()` aponta pro PATH quando
-    /// não acha nada; se aquele binário não existe, `read_status` tem que dar `Err` — não
-    /// devolver um `Status` vazio, que a janela leria como "app não instalado".
-    #[test]
-    fn updater_inalcancavel_e_erro_e_nao_status_vazio() {
-        // Não dá pra tirar o updater do PATH sem mexer em estado global do processo. O que
-        // dá — e é o que importa — é provar que o caminho de erro NÃO passa pelo parse: um
-        // `Status` só nasce de texto que o updater realmente imprimiu.
-        let vazio = parse_json("");
-        assert!(vazio.app_missing, "o parse de vazio marca ausente…");
-        // …e por isso `read_status` não pode devolver ISTO quando falha em executar.
-        // A assinatura é a prova estrutural: `Result<Status, String>`.
-        fn assina(_: fn() -> Result<Status, String>) {}
-        assina(read_status);
-    }
-
-    /// O nome do executável do gestor conhece o Windows — mesma lição do D10 no CLI.
-    ///
-    /// **E ele é `schematize-market`, não `schematize-updater` (ADR-0013/0014).** A asserção do
-    /// nome está aqui de propósito: esta janela existe para falar com o gestor, e apontar para
-    /// o binário APOSENTADO seria conversar com um programa congelado que desfaria o que o
-    /// market acabou de fazer. Nome errado aqui não dá erro — dá estrago silencioso.
-    #[test]
-    fn nome_do_binario_por_plataforma_e_do_gestor_certo() {
-        let p = gestor_bin();
-        let nome = p.file_name().unwrap().to_string_lossy().into_owned();
-        if cfg!(windows) {
-            assert!(nome.ends_with(".exe"), "no Windows o binário é .exe: {nome}");
-        } else {
-            assert!(!nome.ends_with(".exe"), "fora do Windows não tem .exe: {nome}");
-        }
-        assert!(nome.starts_with("schematize-market"), "o dono mudou (ADR-0013): {nome}");
-        assert!(!nome.contains("updater"), "o updater foi aposentado: {nome}");
+    fn argumento_desconhecido_nao_derruba_nada() {
+        assert_eq!(aba_inicial(["--nao-existe".to_string()].into_iter()), 0);
+        assert_eq!(aba_inicial(["".to_string(), "-".to_string()].into_iter()), 0);
     }
 }
