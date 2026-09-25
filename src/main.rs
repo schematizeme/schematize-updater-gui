@@ -112,6 +112,20 @@ fn aba_inicial(args: impl Iterator<Item = String>) -> i32 {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // **RESPONDE `--version` E SAI, antes de qualquer coisa gráfica.**
+    //
+    // Sem isto a janela IGNORA a flag e ABRE — e quem perguntou fica esperando. Não é hipótese:
+    // o `debugreport` do CLI pergunta a versão de cada binário do ecossistema, e a janela do hub
+    // já teve exatamente este defeito. O `cmd_out` cortava no timeout e devolvia a primeira
+    // linha do log de ambiente (`(WAYLAND_DISPLAY=wayland-0)`) como se fosse o número da versão.
+    //
+    // Responder e sair é o contrato mínimo de um binário de linha de comando — inclusive de um
+    // que normalmente abre janela.
+    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
+        println!("schematize-market-gui {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let w = MainWindow::new()?;
     let aba = aba_inicial(std::env::args().skip(1));
     w.set_aba(aba);
@@ -384,5 +398,39 @@ mod tests_aba {
     fn argumento_desconhecido_nao_derruba_nada() {
         assert_eq!(aba_inicial(["--nao-existe".to_string()].into_iter()), 0);
         assert_eq!(aba_inicial(["".to_string(), "-".to_string()].into_iter()), 0);
+    }
+}
+
+#[cfg(test)]
+mod tests_versao {
+    /// **A janela responde `--version` e SAI, em vez de abrir.**
+    ///
+    /// Lê o próprio fonte e exige que a checagem seja a PRIMEIRA coisa do `main` — antes de
+    /// qualquer chamada gráfica. A ordem é o ponto: a flag tratada depois de abrir a janela
+    /// responde tarde demais, e quem perguntou já está esperando.
+    ///
+    /// **O defeito é conhecido e já custou um relatório errado.** O `debugreport` do CLI
+    /// pergunta a versão de cada binário do ecossistema; a janela do hub ignorava a flag e
+    /// abria, o `cmd_out` cortava no timeout, e a primeira linha do log de ambiente
+    /// (`(WAYLAND_DISPLAY=wayland-0)`) entrava no relatório como se fosse o número da versão.
+    #[test]
+    fn responde_version_antes_de_abrir_a_janela() {
+        let fonte = include_str!("main.rs");
+        let producao = fonte.split("#[cfg(test)]").next().unwrap();
+        let i = producao.find("fn main(").expect("há um main");
+        let corpo = &producao[i..];
+
+        let versao = corpo.find("\"--version\"").expect(
+            "a janela tem de responder `--version` — sem isso ela ABRE quando alguém pergunta",
+        );
+        // A checagem vem antes de tudo que toca a tela. `MainWindow::new()` é a primeira
+        // chamada gráfica de todas.
+        let janela = corpo.find("MainWindow::new").expect("o main cria a janela");
+        assert!(
+            versao < janela,
+            "`--version` é tratado DEPOIS de criar a janela — responder tarde é o mesmo que \
+             não responder, porque a janela já subiu"
+        );
+        assert!(corpo[versao..janela].contains("return"), "tem de RESPONDER e SAIR");
     }
 }
