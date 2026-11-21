@@ -222,16 +222,32 @@ pub fn run_streaming(subcmd: &str, weak: slint::Weak<MainWindow>) {
     }
 }
 
+/// Teto do log da janela, em bytes (cauda mantida).
+const LOG_MAX_BYTES: usize = 20_000;
+
+/// **O quê:** anexa `line` a `log` e, se passar de `max` bytes, descarta o começo mantendo a cauda,
+/// sempre cortando numa fronteira de caractere UTF-8.
+///
+/// **Onde:** [`push_log`]. Antes fatiava `s[len - 20_000..]` direto: o log tem `✓`/`✗`/acentos
+/// (multibyte), e cortar no meio de um deles dá panic na thread de UI.
+fn anexar_cauda(log: &mut String, line: &str, max: usize) {
+    log.push_str(line);
+    if log.len() > max {
+        let mut corte = log.len() - max;
+        while !log.is_char_boundary(corte) {
+            corte += 1;
+        }
+        log.drain(..corte);
+    }
+}
+
 /// Anexa `line` ao log da janela pelo event loop, limitando ao tail (~20k chars).
 pub fn push_log(weak: &slint::Weak<MainWindow>, line: String) {
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(w) = weak.upgrade() {
             let mut s = w.get_log().to_string();
-            s.push_str(&line);
-            if s.len() > 20_000 {
-                s = s[s.len() - 20_000..].to_string();
-            }
+            anexar_cauda(&mut s, &line, LOG_MAX_BYTES);
             w.set_log(s.into());
         }
     });
@@ -240,6 +256,18 @@ pub fn push_log(weak: &slint::Weak<MainWindow>, line: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cauda cortada no meio de um caractere multibyte NÃO dá panic e respeita o teto.
+    #[test]
+    fn cauda_do_log_corta_em_fronteira_utf8() {
+        let mut log = "✓".repeat(10); // 3 bytes cada
+        anexar_cauda(&mut log, "ação\n", 20);
+        assert!(log.len() <= 20, "passou do teto: {}", log.len());
+        assert!(log.ends_with("ação\n"));
+        let mut curto = String::from("a");
+        anexar_cauda(&mut curto, "b", 20);
+        assert_eq!(curto, "ab");
+    }
 
     /// Saída típica do `schematize-market status --json` — o CONTRATO, copiado do que o
     /// market de fato emite (travado do lado de lá por `o_shape_do_json_e_contrato`).
